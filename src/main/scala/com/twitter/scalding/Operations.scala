@@ -165,38 +165,30 @@ import CascadingUtils.kryoFor
   class MRMAggregator[T,X,U](fsmf : T => X, rfn : (X,X) => X, mrfn : X => U, fields : Fields,
     conv : TupleConverter[T], set : TupleSetter[U])
     extends BaseOperation[Tuple](fields) with Aggregator[Tuple] {
-    // The context is a singleton Tuple, which is mutable so
-    // we don't have to allocate at every step of the loop:
-    def start(flowProcess : FlowProcess[_], call : AggregatorCall[Tuple]) {
-        call.setContext(null)
-    }
+    // The context is a singleton Tuple, which is mutable so we don't have to
+    // allocate at every step of the loop
+    override def prepare(flowProcess : FlowProcess[_], call : OperationCall[Tuple]) = call.setContext(Tuple.size(1))
+
+    // Reset the context
+    def start(flowProcess : FlowProcess[_], call : AggregatorCall[Tuple]) = call.getContext.set(0, null)
 
     def extractArgument(call : AggregatorCall[Tuple]) : X = fsmf(conv(call.getArguments))
 
     def aggregate(flowProcess : FlowProcess[_], call : AggregatorCall[Tuple]) {
       val arg = extractArgument(call)
       val ctx = call.getContext
-      if (null == ctx) {
-        // Initialize the context, this is the only allocation done by this loop.
-        val newCtx = Tuple.size(1)
-        newCtx.set(0, arg.asInstanceOf[AnyRef])
-        call.setContext(newCtx)
-      }
-      else {
-        // Mutate the context:
-        val oldValue = ctx.getObject(0).asInstanceOf[X]
-        val newValue = rfn(oldValue, arg)
-        ctx.set(0, newValue.asInstanceOf[AnyRef])
-      }
+      val oldValue = ctx.getObject(0).asInstanceOf[X]
+
+      // Mutate the context
+      ctx.set(0, if (null == oldValue) arg.asInstanceOf[AnyRef] else rfn(oldValue, arg))
     }
 
     def complete(flowProcess : FlowProcess[_], call : AggregatorCall[Tuple]) {
-      val ctx = call.getContext
-      if (null != ctx) {
-        val lastValue = ctx.getObject(0).asInstanceOf[X]
-        // Make sure to drop the reference to the lastValue as soon as possible (it may be big)
-        call.setContext(null)
+      val lastValue = call.getContext.getObject(0).asInstanceOf[X]
+      if (null != lastValue) {
         call.getOutputCollector.add(set(mrfn(lastValue)))
+        // Make sure to drop the reference to the lastValue as soon as possible (it may be big)
+        call.getContext.set(0, null)
       }
       else {
         throw new Exception("MRMAggregator completed without any args")
